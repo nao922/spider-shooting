@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<title>糸くも のぼり - spiderclmb</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  * { 
+    margin: 0; 
+    padding: 0; 
+    box-sizing: border-box; 
+    -webkit-tap-highlight-color: transparent; 
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  html, body {
+    width: 100%;
+    height: 100%;
+    height: 100dvh;
+    overflow: hidden; 
+    background: #050311;
+    font-family: 'Press Start 2P', monospace;
+    touch-action: none;
+  }
+  #stage {
+    position: fixed; 
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    display: flex; 
+    align-items: center; 
+    justify-content: center;
+    background: #050311;
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    touch-action: none;
+    box-shadow: 0 0 40px rgba(140,90,220,0.25);
+    max-width: 100vw; 
+    max-height: 100vh;
+    max-height: 100dvh;
+  }
+  #overlay {
+    position: absolute; 
+    inset: 0;
+    display: flex; 
+    flex-direction: column; 
+    align-items: center; 
+    justify-content: center;
+    pointer-events: none;
+    color: #f3eaff;
+    text-align: center;
+  }
+  .panel {
+    pointer-events: auto;
+    background: rgba(15,8,30,0.85);
+    border: 2px solid #b98ee8;
+    box-shadow: 0 0 24px rgba(185,142,232,0.5);
+    padding: 22px 26px;
+    max-width: 85vw;
+  }
+  .panel h1 {
+    font-size: 15px; 
+    color: #ffd77a; 
+    margin-bottom: 16px; 
+    line-height: 1.8;
+    text-shadow: 0 0 8px rgba(255,215,122,0.6);
+  }
+  .panel p {
+    font-size: 9px; 
+    line-height: 2.1; 
+    color: #e4d6ff; 
+    margin-bottom: 8px;
+  }
+  .panel .big {
+    font-size: 20px; 
+    color: #ffd77a; 
+    margin: 14px 0; 
+    text-shadow: 0 0 10px rgba(255,215,122,0.7);
+  }
+  .btn {
+    display: inline-block; 
+    margin-top: 14px;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 10px; 
+    color: #050311;
+    background: #ffd77a;
+    padding: 12px 18px;
+    border: none;
+    box-shadow: 0 3px 0 #b8862f;
+    cursor: pointer;
+  }
+  .btn:active { 
+    transform: translateY(2px); 
+    box-shadow: 0 1px 0 #b8862f; 
+  }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game" width="390" height="700"></canvas>
+  <div id="overlay">
+    <div class="panel" id="startPanel">
+      <h1>糸くもの<br>よぞら のぼり</h1>
+      <p>長押しで蜘蛛の糸を発射！<br>押している間糸が急速に縮む！</p>
+      <p>ホタルに引っかけて引き寄せ<br>指を離して大ジャンプ！</p>
+      <div class="btn" id="startBtn">タップして START</div>
+    </div>
+    <div class="panel hidden" id="overPanel">
+      <h1>GAME OVER</h1>
+      <div class="big" id="finalScore">高度 0 m</div>
+      <p id="bestScoreLine">最高 0 m</p>
+      <div class="btn" id="retryBtn">もう一度</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  function preventScroll(e) {
+    e.preventDefault();
+  }
+  document.addEventListener('touchmove', preventScroll, { passive: false });
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  const W = canvas.width, H = canvas.height;
+
+  // ---------- 定数パラメータ ----------
+  const GRAVITY = 420;            // 重力を従来の約半分に減量（850 -> 420）
+  const PULL_ACCEL = 1800;        // 長押し時の糸の巻き取り（縮む）加速度
+  const ROT_SPEED = 5.2;          
+  const ARROW_RADIUS = 30;        
+  const WEB_MAX_RANGE = 450;      
+  const CAMERA_OFFSET = H * 0.45;
+  const WALL_MARGIN = 10;         
+  const PIXELS_PER_METER = 12;
+  const GROUND_Y = 0;             
+
+  const SPRITE = [
+    "...........",
+    "..L.....L..",
+    ".L.L...L.L.",
+    "..LLLLLLL..",
+    ".LLBBBBBLL.",
+    "LLBBEBEBBLL",
+    ".LLBBBBBLL.",
+    "..LLLLLLL..",
+    ".L.L...L.L.",
+    "..L.....L..",
+    "..........."
+  ];
+  const SPRITE_COLORS = { L:'#6d4d80', B:'#8a63a3', E:'#ff6b81' };
+  const SPRITE_PS = 4;
+
+  let obIdCounter = 0;
+
+  // ---------- ゲーム状態管理 ----------
+  let state = 'start';
+  let isPointerDown = false; // 長押し判定用フラグ
+  let spider, obstacles, cameraY, highestGenY, arrowAngle, missFx, maxAltitude, bestAltitude=0, stars, time;
+  let arrowTime = 0;
+
+  function reset(){
+    const initY = -H * 0.10;
+    spider = {
+      x: W / 2, 
+      y: initY, 
+      vx: 0, 
+      vy: 0,
+      attached: false, 
+      anchor: null, 
+      currentRopeLength: 0, 
+      tilt: 0,
+      lastAnchorId: null,
+      cooldownTimer: 0,
+      legPhase: 0
+    };
+    obstacles = [];
+    cameraY = initY - CAMERA_OFFSET;
+    highestGenY = initY - 100;
+    arrowAngle = -Math.PI / 2;
+    arrowTime = 0;
+    missFx = null;
+    maxAltitude = 0;
+    time = 0;
+    stars = [];
+    for (let i=0; i<70; i++){
+      stars.push({ x: Math.random()*W, y: Math.random()*H*6 - H*4, ph: Math.random()*Math.PI*2, r: Math.random()<0.15?1.6:0.9 });
+    }
+
+    obstacles.push({
+      id: obIdCounter++,
+      x: W / 2,
+      y: initY - 180,
+      r: 80,
+      ph: 0
+    });
+
+    generateObstacles(true);
+  }
+
+  function generateObstacles(initial){
+    while (highestGenY > cameraY - H * 2.2){
+      const gapY = 90 + Math.random() * 80;
+      highestGenY -= gapY;
+      const margin = WALL_MARGIN + 20;
+      const x = margin + Math.random() * (W - margin * 2);
+      const radius = 60 + Math.random() * 50;
+      
+      obstacles.push({
+        id: obIdCounter++,
+        x: x,
+        y: highestGenY,
+        r: radius,
+        ph: Math.random() * Math.PI * 2
+      });
+    }
+    obstacles = obstacles.filter(o => o.y < cameraY + H + 220);
+  }
+
+  // ---------- 入力処理（押下＆離脱） ----------
+  function handlePointerDown(){
+    if (state === 'start'){ startGame(); return; }
+    if (state === 'over'){ return; }
+    if (state !== 'playing') return;
+
+    isPointerDown = true;
+    if (!spider.attached) {
+      tryShootWeb();
+    }
+  }
+
+  function handlePointerUp(){
+    if (state !== 'playing') return;
+    
+    isPointerDown = false;
+    if (spider.attached) {
+      // 指を離した瞬間：糸を消去。縮む際に加速された速度ベクトルをそのまま維持して飛翔
+      spider.lastAnchorId = spider.anchor ? spider.anchor.id : null;
+      spider.cooldownTimer = 0.3;
+
+      spider.attached = false;
+      spider.anchor = null;
+
+      arrowTime = 0; // 照準固定・振り始め
+    }
+  }
+
+  function tryShootWeb(){
+    const dir = { x: Math.cos(arrowAngle), y: Math.sin(arrowAngle) };
+    let best = null, bestDist = Infinity;
+    for (const ob of obstacles){
+      if (spider.cooldownTimer > 0 && ob.id === spider.lastAnchorId) continue;
+
+      const ex = ob.x - spider.x, ey = ob.y - spider.y;
+      const proj = ex*dir.x + ey*dir.y;
+      if (proj < 0 || proj > WEB_MAX_RANGE) continue;
+      const perp2 = (ex*ex+ey*ey) - proj*proj;
+      const hitR = ob.r + 15;
+      if (perp2 <= hitR*hitR && proj < bestDist){
+        bestDist = proj; best = ob;
+      }
+    }
+    if (best){
+      attachTo(best);
+    } else {
+      missFx = { x1:spider.x, y1:spider.y, x2: spider.x+dir.x*WEB_MAX_RANGE, y2: spider.y+dir.y*WEB_MAX_RANGE, t:0 };
+    }
+  }
+
+  function attachTo(ob){
+    const dx = spider.x - ob.x, dy = spider.y - ob.y;
+    spider.anchor = ob;
+    spider.currentRopeLength = Math.hypot(dx, dy);
+    spider.attached = true;
+  }
+
+  // ---------- 物理更新 ----------
+  function update(dt){
+    time += dt;
+
+    if (spider.cooldownTimer > 0) {
+      spider.cooldownTimer -= dt;
+      if (spider.cooldownTimer <= 0) {
+        spider.lastAnchorId = null;
+      }
+    }
+    
+    if (!spider.attached) {
+      arrowTime += dt;
+      const swingRange = Math.PI * 90 / 360; // 90度幅
+      arrowAngle = -Math.PI / 2 + Math.sin(arrowTime * ROT_SPEED) * swingRange;
+    }
+
+    if (state !== 'playing') return;
+
+    if (spider.attached && spider.anchor){
+      const ob = spider.anchor;
+
+      // 1. 重力適用
+      spider.vy += GRAVITY * dt;
+
+      // 2. 長押し中：ホタルの中心に向かって強烈に巻き取り（糸を縮める加速）
+      const dx = spider.x - ob.x;
+      const dy = spider.y - ob.y;
+      const dist = Math.hypot(dx, dy);
+
+      if (isPointerDown && dist > 10) {
+        const nx = dx / dist;
+        const ny = dy / dist;
+        // 中心方向へ加速を加える（慣性を蓄積）
+        spider.vx -= nx * PULL_ACCEL * dt;
+        spider.vy -= ny * PULL_ACCEL * dt;
+      }
+
+      // 3. 位置更新
+      spider.x += spider.vx * dt;
+      spider.y += spider.vy * dt;
+
+      // 4. 糸の長さの更新と拘束（引き寄せられて短くなった長さを新しい上限とする）
+      const newDx = spider.x - ob.x;
+      const newDy = spider.y - ob.y;
+      const newDist = Math.hypot(newDx, newDy);
+
+      if (newDist < spider.currentRopeLength) {
+        // ホタルに近づいたら、糸の最大到達可能長さをリアルタイムに縮める
+        spider.currentRopeLength = newDist;
+      } else if (newDist > spider.currentRopeLength && newDist > 0) {
+        // 現在の糸の長さ以上に離れようとした場合、外向き速度成分をカットしてピンと張る
+        const nx = newDx / newDist;
+        const ny = newDy / newDist;
+
+        spider.x = ob.x + nx * spider.currentRopeLength;
+        spider.y = ob.y + ny * spider.currentRopeLength;
+
+        const radialVel = spider.vx * nx + spider.vy * ny;
+        if (radialVel > 0) {
+          // 張力により伸ばす方向の速度成分を打ち消す
+          spider.vx -= radialVel * nx;
+          spider.vy -= radialVel * ny;
+        }
+      }
+
+      spider.tilt += (Math.atan2(newDx, -newDy) * 0.4 - spider.tilt) * Math.min(1, dt * 8);
+      const speed = Math.hypot(spider.vx, spider.vy);
+      spider.legPhase += speed * dt * 0.02 + dt * 6;
+
+    } else {
+      // 自由落下/飛翔
+      spider.vy += GRAVITY * dt;
+      spider.x += spider.vx * dt;
+      spider.y += spider.vy * dt;
+
+      if (spider.x < WALL_MARGIN){ 
+        spider.x = WALL_MARGIN; 
+        spider.vx = Math.abs(spider.vx) * 0.7; 
+      }
+      if (spider.x > W - WALL_MARGIN){ 
+        spider.x = W - WALL_MARGIN; 
+        spider.vx = -Math.abs(spider.vx) * 0.7; 
+      }
+
+      if (spider.y >= GROUND_Y - 10){
+        spider.y = GROUND_Y - 10;
+        if (spider.vy > 50) {
+          spider.vy = -spider.vy * 0.35;
+        } else {
+          spider.vy = 0;
+        }
+        spider.vx *= 0.85;
+      }
+
+      const targetTilt = Math.max(-0.35, Math.min(0.35, spider.vx * 0.0022));
+      spider.tilt += (targetTilt - spider.tilt) * Math.min(1, dt * 6);
+
+      const speed = Math.hypot(spider.vx, spider.vy);
+      spider.legPhase += speed * dt * 0.02 + dt * 6;
+    }
+
+    const currentAlt = Math.max(0, -spider.y);
+    if (currentAlt > maxAltitude) maxAltitude = currentAlt;
+
+    const desiredCam = spider.y - CAMERA_OFFSET;
+    cameraY = Math.min(cameraY, desiredCam);
+
+    generateObstacles();
+
+    if (missFx){
+      missFx.t += dt;
+      if (missFx.t > 0.16) missFx = null;
+    }
+
+    if (spider.y - cameraY > H + 80){
+      endGame();
+    }
+  }
+
+  function endGame(){
+    state = 'over';
+    isPointerDown = false;
+    const altM = Math.floor(maxAltitude / PIXELS_PER_METER);
+    if (altM > bestAltitude) bestAltitude = altM;
+    document.getElementById('finalScore').textContent = `高度 ${altM} m`;
+    document.getElementById('bestScoreLine').textContent = `最高 ${bestAltitude} m`;
+    document.getElementById('overPanel').classList.remove('hidden');
+  }
+
+  function startGame(){
+    document.getElementById('startPanel').classList.add('hidden');
+    document.getElementById('overPanel').classList.add('hidden');
+    reset();
+    state = 'playing';
+  }
+
+  function drawSpider(sX, sY, tilt, phase){
+    ctx.save();
+    ctx.translate(sX, sY);
+    ctx.rotate(tilt);
+
+    const rows = SPRITE.length;
+    const cols = SPRITE[0].length;
+    const halfW = (cols * SPRITE_PS) / 2;
+    const halfH = (rows * SPRITE_PS) / 2;
+
+    for (let r=0; r<rows; r++){
+      for (let c=0; c<cols; c++){
+        const ch = SPRITE[r][c];
+        if (ch === '.') continue;
+
+        let px = c * SPRITE_PS - halfW;
+        let py = r * SPRITE_PS - halfH;
+
+        if (ch === 'L') {
+          const isLeft = c < cols / 2;
+          const legIndex = (r < rows / 2 ? 0 : 1) + (isLeft ? 0 : 2);
+          const legWave = Math.sin(phase + legIndex * Math.PI * 0.5) * 2.5;
+          px += isLeft ? -legWave : legWave;
+          py += Math.cos(phase + legIndex * Math.PI * 0.5) * 1.5;
+        }
+
+        ctx.fillStyle = SPRITE_COLORS[ch];
+        ctx.fillRect(px, py, SPRITE_PS, SPRITE_PS);
+      }
+    }
+
+    ctx.restore();
+  }
+
+  function skyColors(altM){
+    const t = Math.max(0, Math.min(1, altM/380));
+    function lerp(a,b,t){ return a+(b-a)*t; }
+    function hex(c){ return '#'+c.map(v=>Math.round(v).toString(16).padStart(2,'0')).join(''); }
+    const topDay=[124,91,166], topNight=[6,4,17];
+    const botDay=[201,139,206], botNight=[27,16,48];
+    const top = [0,1,2].map(i=>lerp(topDay[i],topNight[i],t));
+    const bot = [0,1,2].map(i=>lerp(botDay[i],botNight[i],t));
+    return { top:hex(top), bot:hex(bot), starAlpha:t };
+  }
+
+  function draw(){
+    const altM = Math.floor(maxAltitude / PIXELS_PER_METER);
+    const sky = skyColors(altM);
+    const grad = ctx.createLinearGradient(0,0,0,H);
+    grad.addColorStop(0, sky.top);
+    grad.addColorStop(1, sky.bot);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0,0,W,H);
+
+    if (sky.starAlpha > 0.05){
+      ctx.save();
+      for (const s of stars){
+        const sy = s.y - cameraY*0.6;
+        const wsy = ((sy % (H*6)) + H*6) % (H*6) - H*2;
+        if (wsy < -10 || wsy > H+10) continue;
+        const tw = 0.5 + 0.5*Math.sin(time*2 + s.ph);
+        ctx.globalAlpha = sky.starAlpha * (0.4 + 0.6*tw);
+        ctx.fillStyle = '#f3ecff';
+        ctx.fillRect(s.x, wsy, s.r, s.r);
+      }
+      ctx.restore();
+    }
+
+    const groundScreenY = GROUND_Y - cameraY;
+    if (groundScreenY < H + 50){
+      ctx.fillStyle = '#241b30';
+      ctx.fillRect(0, groundScreenY, W, H);
+      ctx.fillStyle = '#3a2b46';
+      ctx.fillRect(0, groundScreenY, W, 8);
+      for (let x=0; x<W; x+=14){
+        ctx.fillRect(x, groundScreenY + 8, 8, 6);
+      }
+    }
+
+    for (const ob of obstacles){
+      const sx = ob.x, sy = ob.y - cameraY;
+      if (sy < -200 || sy > H + 200) continue;
+      const pulse = 0.8 + 0.2 * Math.sin(time * 3 + ob.ph);
+      const glowR = ob.r + 20 + pulse * 10;
+      
+      const g = ctx.createRadialGradient(sx, sy, ob.r * 0.15, sx, sy, glowR);
+      g.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+      g.addColorStop(0.35, `rgba(255, 215, 122, ${0.85 * pulse})`);
+      g.addColorStop(0.8, 'rgba(255, 215, 122, 0.2)');
+      g.addColorStop(1, 'rgba(255, 215, 122, 0)');
+      
+      ctx.fillStyle = g;
+      ctx.beginPath(); 
+      ctx.arc(sx, sy, glowR, 0, Math.PI*2); 
+      ctx.fill();
+
+      ctx.fillStyle = '#ffe9b0';
+      ctx.beginPath(); 
+      ctx.arc(sx, sy, ob.r * 0.35, 0, Math.PI*2); 
+      ctx.fill();
+    }
+
+    // 糸の描画
+    if (spider.attached && spider.anchor){
+      ctx.save();
+      ctx.strokeStyle = 'rgba(239,230,255,0.95)';
+      ctx.lineWidth = 2.0;
+      ctx.shadowColor = 'rgba(185,142,232,0.8)';
+      ctx.shadowBlur = 5;
+      ctx.beginPath();
+      ctx.moveTo(spider.anchor.x, spider.anchor.y - cameraY);
+      ctx.lineTo(spider.x, spider.y - cameraY);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    if (missFx){
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, 1 - missFx.t/0.16);
+      ctx.strokeStyle = 'rgba(200,200,220,0.7)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4,4]);
+      ctx.beginPath();
+      ctx.moveTo(missFx.x1, missFx.y1-cameraY);
+      ctx.lineTo(missFx.x2, missFx.y2-cameraY);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    if (state==='playing' && !spider.attached){
+      const ax = spider.x + Math.cos(arrowAngle)*ARROW_RADIUS;
+      const ay = spider.y - cameraY + Math.sin(arrowAngle)*ARROW_RADIUS;
+      ctx.save();
+      ctx.translate(ax,ay);
+      ctx.rotate(arrowAngle);
+      ctx.fillStyle = '#ffd77a';
+      ctx.shadowColor = 'rgba(255,215,122,0.8)';
+      ctx.shadowBlur = 6;
+      ctx.beginPath();
+      ctx.moveTo(8,0);
+      ctx.lineTo(-5,-4);
+      ctx.lineTo(-5,4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    drawSpider(spider.x, spider.y - cameraY, spider.tilt||0, spider.legPhase);
+
+    ctx.save();
+    ctx.font = '11px "Press Start 2P", monospace';
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(10,5,20,0.55)';
+    ctx.fillRect(W-140, 10, 128, 26);
+    ctx.fillStyle = '#ffd77a';
+    ctx.fillText(`高度 ${altM} m`, W-16, 27);
+    ctx.restore();
+  }
+
+  let last = performance.now();
+  function loop(now){
+    const dt = Math.min(0.033, (now-last)/1000);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // ポインターイベント（タップ＆離脱）
+  window.addEventListener('pointerdown', (e)=>{ 
+    if (e.target.tagName === 'CANVAS' || e.target.id === 'stage') {
+      e.preventDefault(); 
+      handlePointerDown(); 
+    }
+  }, {passive:false});
+
+  window.addEventListener('pointerup', (e)=>{ 
+    e.preventDefault(); 
+    handlePointerUp(); 
+  }, {passive:false});
+
+  window.addEventListener('pointercancel', (e)=>{ 
+    e.preventDefault(); 
+    handlePointerUp(); 
+  }, {passive:false});
+
+  document.getElementById('startBtn').addEventListener('pointerdown',(e)=>{ e.preventDefault(); e.stopPropagation(); startGame(); });
+  document.getElementById('retryBtn').addEventListener('pointerdown',(e)=>{ e.preventDefault(); e.stopPropagation(); startGame(); });
+
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
